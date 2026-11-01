@@ -1,4 +1,4 @@
-# CYBER universal VST3 updater - v2
+# CYBER universal VST3 updater - v3
 # Close Studio One before running.
 # Run: .\build.ps1
 # If PowerShell blocks it: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
@@ -33,11 +33,22 @@ cmake --build $buildDir --config Release --parallel 4
 if ($LASTEXITCODE -ne 0) { throw 'Build failed; installed plugin unchanged.' }
 
 # JUCE names this directory <Target>_artefacts/Release/VST3/<Plugin>.vst3.
+# Select the bundle generated for the project's PRODUCT_NAME. This prevents
+# stale bundles from a previous name (e.g. CYBERMORPH.vst3) being installed.
+$cmakeLists = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'CMakeLists.txt') -Raw
+if ($PluginName) {
+    $expectedName = $PluginName
+} else {
+    if ($cmakeLists -notmatch '(?m)^\s*PRODUCT_NAME\s+"([^"]+)"') {
+        throw 'No quoted PRODUCT_NAME found in CMakeLists.txt. Specify -PluginName explicitly.'
+    }
+    $expectedName = $Matches[1]
+}
+$expectedBundle = "$expectedName.vst3"
 $bundles = @(Get-ChildItem -LiteralPath $buildDir -Directory -Recurse -Filter '*.vst3' |
-    Where-Object { $_.FullName -match '[\\/]Release[\\/]VST3[\\/]' -and $_.FullName -match 'artefacts' })
-if ($PluginName) { $bundles = @($bundles | Where-Object { $_.Name -ieq "$PluginName.vst3" }) }
+    Where-Object { $_.FullName -match '[\\/]Release[\\/]VST3[\\/]' -and $_.FullName -match 'artefacts' -and $_.Name -ieq $expectedBundle })
 if ($bundles.Count -ne 1) {
-    throw "Found $($bundles.Count) Release VST3 bundles. Specify -PluginName if more than one exists; no installation attempted."
+    throw "Expected $expectedBundle in Release VST3 output but found $($bundles.Count). Check PRODUCT_NAME or use -PluginName; nothing installed."
 }
 $bundle = $bundles[0]
 $binary = @(Get-ChildItem -LiteralPath $bundle.FullName -Recurse -File -Filter '*.vst3')
