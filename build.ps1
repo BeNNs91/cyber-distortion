@@ -1,4 +1,4 @@
-# CYBER universal VST3 updater - v3
+# CYBER universal VST3 updater - v4
 # Close Studio One before running.
 # Run: .\build.ps1
 # If PowerShell blocks it: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
@@ -21,10 +21,59 @@ git pull --ff-only origin $branch
 if ($LASTEXITCODE -ne 0) { throw 'Git pull failed. Build and installation cancelled.' }
 
 Write-Host '[2/3] Configuring and building Release...' -ForegroundColor Cyan
+# CMake caches contain absolute paths and a generator. A moved repo needs a fresh cache.
+# Keep the old generated build until the new VST3 has been installed successfully.
+if ($BuildDirectory -notmatch '^[A-Za-z0-9_.-]+$' -or $BuildDirectory -eq '.' -or $BuildDirectory -eq '..') {
+    throw 'BuildDirectory must be a simple folder name inside the repository.'
+}
 $buildDir = Join-Path $PSScriptRoot $BuildDirectory
-if (!(Test-Path (Join-Path $buildDir 'CMakeCache.txt'))) {
-    cmake -S $PSScriptRoot -B $buildDir -G 'Visual Studio 18 2026' -A x64
-    if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed; installed plugin unchanged.' }
+$cachePath = Join-Path $buildDir 'CMakeCache.txt'
+$expectedGenerator = 'Visual Studio 18 2026'
+$staleBackup = $null
+
+function Compare-CMakeDirectory ([string] $actual, [string] $expected) {
+    if ([string]::IsNullOrWhiteSpace($actual)) { return $false }
+    try {
+        $a = [System.IO.Path]::GetFullPath($actual.Replace('/', '\')).TrimEnd([char]'\')
+        $b = [System.IO.Path]::GetFullPath($expected.Replace('/', '\')).TrimEnd([char]'\')
+        return [string]::Equals($a, $b, [System.StringComparison]::OrdinalIgnoreCase)
+    } catch { return $false }
+}
+
+if (Test-Path -LiteralPath $cachePath) {
+    $cache = @{}
+    foreach ($line in (Get-Content -LiteralPath $cachePath)) {
+        if ($line -match '^([A-Za-z0-9_]+):[^=]*=(.*)$') {
+            $cache[$Matches[1]] = $Matches[2]
+        }
+    }
+    $issues = @()
+    if (!(Compare-CMakeDirectory $cache['CMAKE_HOME_DIRECTORY'] $PSScriptRoot)) {
+        $issues += 'source folder has moved'
+    }
+    if (!(Compare-CMakeDirectory $cache['CMAKE_CACHEFILE_DIR'] $buildDir)) {
+        $issues += 'build folder has moved'
+    }
+    if ($cache['CMAKE_GENERATOR'] -ne $expectedGenerator) {
+        $issues += 'Visual Studio generator has changed'
+    }
+    if ($cache['CMAKE_GENERATOR_PLATFORM'] -ne 'x64') {
+        $issues += 'build platform is not x64'
+    }
+    if ($issues.Count -gt 0) {
+        Write-Host ("Stale CMake cache: " + ($issues -join '; ')) -ForegroundColor Yellow
+        $backupRoot = Join-Path (Split-Path -Parent $PSScriptRoot) '.cyber-build-backups'
+        New-Item -Path $backupRoot -ItemType Directory -Force | Out-Null
+        $backupName = '{0}-{1}-{2}-{3}' -f (Split-Path -Leaf $PSScriptRoot), $BuildDirectory, (Get-Date -Format 'yyyyMMdd-HHmmss'), ([guid]::NewGuid().ToString('N').Substring(0, 6))
+        $staleBackup = Join-Path $backupRoot $backupName
+        Move-Item -LiteralPath $buildDir -Destination $staleBackup
+        Write-Host "Old build safely moved to $staleBackup"
+    }
+}
+if (!(Test-Path -LiteralPath $cachePath)) {
+    Write-Host 'Creating a fresh Visual Studio 2026 CMake configuration...' -ForegroundColor Cyan
+    cmake -S $PSScriptRoot -B $buildDir -G $expectedGenerator -A x64
+    if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed; installed plugin unchanged. Old build backup preserved.' }
 } else {
     cmake -S $PSScriptRoot -B $buildDir
     if ($LASTEXITCODE -ne 0) { throw 'CMake reconfigure failed; installed plugin unchanged.' }
@@ -78,4 +127,13 @@ try {
     if (Test-Path $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
 }
 Write-Host "SUCCESS: $destination" -ForegroundColor Green
+# Clean up stale generated files only after the replacement has installed.
+if ($staleBackup -and (Test-Path -LiteralPath $staleBackup)) {
+    try {
+        Remove-Item -LiteralPath $staleBackup -Recurse -Force
+        Write-Host 'Cleaned up obsolete CMake build backup.'
+    } catch {
+        Write-Warning "New plugin installed, but old build backup could not be removed: $staleBackup"
+    }
+}
 Write-Host 'Restart or rescan Studio One to load the updated plugin.'
