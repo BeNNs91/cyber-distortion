@@ -1,0 +1,48 @@
+name: VST3 ZIP - CYBERDISTORTION
+on:
+  push:
+    branches: [main, 'feature/initial-juce-scaffold']
+  workflow_dispatch:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: vst3-zip-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build-vst3:
+    runs-on: windows-2022
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: ${{ runner.os }}-CYBERDISTORTION-juce-8.0.16-security-v1
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+      - name: Build VST3 Release
+        run: cmake --build build --config Release --target CyberDistortion_VST3 --parallel 4
+      - name: Package VST3 bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $folder = 'build/CyberDistortion_artefacts/Release/VST3'
+          $vst = Get-ChildItem -LiteralPath $folder -Directory -Filter '*.vst3' | Select-Object -First 1
+          if (!$vst) { throw "No VST3 bundle in $folder" }
+          $binary = Get-ChildItem -LiteralPath $vst.FullName -File -Recurse -Filter '*.vst3' | Select-Object -First 1
+          if (!$binary) { throw "Missing VST3 binary inside $($vst.FullName)" }
+          New-Item -ItemType Directory -Path 'dist' -Force | Out-Null
+          Copy-Item -LiteralPath $vst.FullName -Destination dist -Recurse
+          Write-Host "Packaged $($vst.Name) into VST3-only artifact"
+      - name: Upload VST3 ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: CYBERDISTORTION-VST3-Windows-x64-${{ github.run_number }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+          include-hidden-files: true
