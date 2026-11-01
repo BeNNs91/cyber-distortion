@@ -54,3 +54,9 @@ void CyberDistortionAudioProcessor::setStateInformation(const void* data, int si
             parameters.replaceState(juce::ValueTree::fromXml(*xml));
     }
 }
+
+// JUCE's plugin wrapper entry point.
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new CyberDistortionAudioProcessor();
+}
