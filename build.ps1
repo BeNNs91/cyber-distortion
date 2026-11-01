@@ -1,47 +1,70 @@
-# CYBER local updater: git pull (fast-forward only), build Release VST3, install to Studio One.
-# Run from PowerShell in the repository: .\build.ps1
-# Requires Git, CMake, Visual Studio 2022 C++ build tools; Administrator access for system VST3 installation.
+# CYBER universal VST3 updater - v2
+# Close Studio One before running.
+# Run: .\build.ps1
+# If PowerShell blocks it: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
+# Requires Git, CMake and Visual Studio 2026 C++ tools (or an existing configured CMake build).
+# This script updates the ACTIVE Git branch only. It never switches or merges branches.
+param([string]$BuildDirectory = 'build-vs2026', [string]$PluginName = '')
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
-if (!(Test-Path '.git')) { throw 'Run this script from a cloned Git repository.' }
-$changes = @(git status --porcelain)
-if ($LASTEXITCODE -ne 0) { throw 'Git status failed.' }
-if ($changes.Count -gt 0) { throw 'Uncommitted changes detected. Commit or stash them first; nothing has been pulled or installed.' }
-Write-Host '[1/3] Pulling the current branch (fast-forward only)...'
-git pull --ff-only
-if ($LASTEXITCODE -ne 0) { throw 'Git pull failed. Existing plugin was not touched.' }
-Write-Host '[2/3] Configuring and building Release VST3...'
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed. Existing plugin was not touched.' }
-cmake --build build --config Release --target CyberDistortion_VST3 --parallel 4
-if ($LASTEXITCODE -ne 0) { throw 'Build failed. Existing plugin was not touched.' }
-$release = Join-Path $PSScriptRoot 'build/CyberDistortion_artefacts/Release/VST3'
-if (!(Test-Path -LiteralPath $release)) { throw "VST3 output not found: $release" }
-$bundle = Get-ChildItem -LiteralPath $release -Directory -Filter '*.vst3' | Select-Object -First 1
-if (!$bundle) { throw 'No built .vst3 bundle found.' }
-$binary = Get-ChildItem -LiteralPath $bundle.FullName -Recurse -File -Filter '*.vst3' | Select-Object -First 1
-if (!$binary) { throw 'VST3 binary missing; old installation untouched.' }
-Write-Host '[3/3] Installing VST3 for Studio One...'
-$installRoot = Join-Path $env:ProgramFiles 'Common Files\VST3'
+
+if (!(Test-Path (Join-Path $PSScriptRoot '.git'))) { throw 'No Git checkout found in this folder.' }
+$tracked = @(git diff --name-only HEAD)
+if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect local Git changes.' }
+if ($tracked.Count -gt 0) {
+    throw 'Tracked files have local changes. Commit or stash before updating; your files were not changed.'
+}
+$branch = (git branch --show-current).Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($branch)) { throw 'No active Git branch.' }
+Write-Host "[1/3] Pulling $branch..." -ForegroundColor Cyan
+git pull --ff-only origin $branch
+if ($LASTEXITCODE -ne 0) { throw 'Git pull failed. Build and installation cancelled.' }
+
+Write-Host '[2/3] Configuring and building Release...' -ForegroundColor Cyan
+$buildDir = Join-Path $PSScriptRoot $BuildDirectory
+if (!(Test-Path (Join-Path $buildDir 'CMakeCache.txt'))) {
+    cmake -S $PSScriptRoot -B $buildDir -G 'Visual Studio 18 2026' -A x64
+    if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed; installed plugin unchanged.' }
+} else {
+    cmake -S $PSScriptRoot -B $buildDir
+    if ($LASTEXITCODE -ne 0) { throw 'CMake reconfigure failed; installed plugin unchanged.' }
+}
+cmake --build $buildDir --config Release --parallel 4
+if ($LASTEXITCODE -ne 0) { throw 'Build failed; installed plugin unchanged.' }
+
+# JUCE names this directory <Target>_artefacts/Release/VST3/<Plugin>.vst3.
+$bundles = @(Get-ChildItem -LiteralPath $buildDir -Directory -Recurse -Filter '*.vst3' |
+    Where-Object { $_.FullName -match '[\\/]Release[\\/]VST3[\\/]' -and $_.FullName -match 'artefacts' })
+if ($PluginName) { $bundles = @($bundles | Where-Object { $_.Name -ieq "$PluginName.vst3" }) }
+if ($bundles.Count -ne 1) {
+    throw "Found $($bundles.Count) Release VST3 bundles. Specify -PluginName if more than one exists; no installation attempted."
+}
+$bundle = $bundles[0]
+$binary = @(Get-ChildItem -LiteralPath $bundle.FullName -Recurse -File -Filter '*.vst3')
+if ($binary.Count -eq 0) { throw 'VST3 binary not found inside bundle; installed plugin unchanged.' }
+
+Write-Host "[3/3] Installing $($bundle.Name)..." -ForegroundColor Cyan
+$installRoot = Join-Path $env:CommonProgramFiles 'VST3'
 New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
 $destination = Join-Path $installRoot $bundle.Name
 $staging = Join-Path $installRoot ($bundle.Name + '.installing')
 $backup = Join-Path $installRoot ($bundle.Name + '.previous')
-if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+if (Test-Path $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
 Copy-Item -LiteralPath $bundle.FullName -Destination $staging -Recurse
-if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
-$hadPrevious = Test-Path -LiteralPath $destination
+$hadPrevious = Test-Path $destination
 try {
-    if ($hadPrevious) { Move-Item -LiteralPath $destination -Destination $backup }
+    if ($hadPrevious) {
+        if (Test-Path $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
+        Move-Item -LiteralPath $destination -Destination $backup
+    }
     Move-Item -LiteralPath $staging -Destination $destination
-    if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
 } catch {
-    if ($hadPrevious -and !(Test-Path -LiteralPath $destination) -and (Test-Path -LiteralPath $backup)) {
+    if ($hadPrevious -and !(Test-Path $destination) -and (Test-Path $backup)) {
         Move-Item -LiteralPath $backup -Destination $destination
     }
     throw
 } finally {
-    if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+    if (Test-Path $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
 }
-Write-Host "SUCCESS: $destination"
-Write-Host 'Restart Studio One or rescan plugins to test.'
+Write-Host "SUCCESS: $destination" -ForegroundColor Green
+Write-Host 'Restart or rescan Studio One to load the updated plugin.'
